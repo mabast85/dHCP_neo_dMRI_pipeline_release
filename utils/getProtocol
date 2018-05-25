@@ -1,0 +1,135 @@
+#!/bin/bash
+
+
+if [ "${11}" == "" ];then
+    echo "The script will build a protocol file to use with the neonatal dMRI processing"
+    echo ""
+    echo "usage: getProtocol <bvals_up> <bvals_down> <bvecs_up> <bvecs_down> <pe_up> <pe_down> <ro_up> <ro_down> <output>"
+    echo ""
+    echo "       bvals_up: b-values for the blip up volumes"
+    echo "       bvals_down: b-values for the blip down volumes (0 if not acquired)"
+    echo "       bvecs_up: b-vectors for the blip up volumes"
+    echo "       bvecs_down: b-vectors for the blip down volumes (0 if not acquired)"
+    echo "       pe_up: phase encoding direction for the blip up volumes (1: LR, 2: RL, 3: AP, 4: PA)"
+    echo "       pe_down: phase encoding direction for the blip down volumes (0 if not acquired, 1: LR, 2: RL, 3: AP, 4: PA)"
+    echo "       ro_up: total readout time (in seconds) for the blip up volumes"
+    echo "       ro_down: total readout time (in seconds) for the blip up volumes (0 if not acquired)"
+    echo "       vols_up: blip up volumes"
+    echo "       vols_down: blip down volumes"
+    echo "       output: output basename"
+    echo ""
+    exit 1
+fi
+
+b_up=$1
+b_down=$2
+g_up=$3
+g_down=$4
+p_up=$5
+p_down=$6
+ro_up=$7
+ro_down=$8
+v_up=$9
+v_down=${10}
+out=${11}
+
+rm ${out}.*
+
+# Import bvals
+if [ -e ${b_up} ]; then
+    bvals=(`cat ${b_up}`)
+else
+    echo "ERROR! bvals_up file does not exist!"
+    exit 1
+fi
+# Import bvecs
+if [ -e ${g_up} ]; then
+    ii=0
+    while read line; do
+	#echo ${line}
+	tmp=(${line})
+	if [ ${ii} -eq 0 ]; then
+	    bvecs_x=("${tmp[@]}")
+	elif [ ${ii} -eq 1 ]; then
+	    bvecs_y=("${tmp[@]}")
+	elif [ ${ii} -eq 2 ]; then
+	    bvecs_z=("${tmp[@]}")
+	fi
+	ii=$((${ii} + 1))
+    done < ${g_up}
+else
+    echo "ERROR! bvecs_up file does not exist!"
+    exit 1
+fi
+# Check sizes consistency
+dimt4=`${FSLDIR}/bin/fslval ${v_up} dim4`
+if [ ${#bvals[@]} -ne ${dimt4} ]; then
+    echo "ERROR! Data size does not match the number of bvals"
+    exit 1
+elif [ ${#bvecs_x[@]} -ne ${dimt4} ]; then
+    echo "${#bvecs_x[@]}"
+    echo "${dimt4}"
+    echo "ERROR! Data size does not match the number of bvecs"
+    exit 1
+elif [ ${#bvals[@]} -ne  ${#bvecs_x[@]} ]; then
+    echo "ERROR! Bvals and bvecs do not have the same number of columns"
+    exit 1
+fi
+# Start writing protocol file
+ii=0
+for b in "${bvals[@]}"; do
+    echo "${bvecs_x[ii]} ${bvecs_y[ii]} ${bvecs_z[ii]} ${b} ${p_up} ${ro_up}" >> ${out}.txt
+    ii=$((${ii} + 1))
+done
+
+if [ "${b_down}" != "0" ]; then
+    # Import bvals
+    if [ -e ${b_down} ]; then
+	bvals=(`cat ${b_down}`)
+    else
+	echo "ERROR! bvals_down file does not exist!"
+	exit 1
+    fi
+    # Import bvecs
+    if [ -e ${g_down} ]; then
+	ii=0
+	while read line; do
+	    #echo ${line}
+	    tmp=(${line})
+	    if [ ${ii} -eq 0 ]; then
+		bvecs_x=("${tmp[@]}")
+	    elif [ ${ii} -eq 1 ]; then
+		bvecs_y=("${tmp[@]}")
+	    elif [ ${ii} -eq 2 ]; then
+		bvecs_z=("${tmp[@]}")
+	    fi
+	    ii=$((${ii} + 1))
+	done < ${g_down}
+    else
+	echo "ERROR! bvecs_down file does not exist!"
+	exit 1
+    fi
+    # Check sizes consistency
+    dimt4=`${FSLDIR}/bin/fslval ${v_down} dim4`
+    if [ ${#bvals[@]} -ne ${dimt4} ]; then
+	echo "ERROR! Data size does not match the number of bvals"
+	exit 1
+    elif [ ${#bvecs_x[@]} -ne ${dimt4} ]; then
+	echo "ERROR! Data size does not match the number of bvecs"
+	exit 1
+    elif [ ${#bvals[@]} -ne  ${#bvecs_x[@]} ]; then
+	echo "ERROR! Bvals and bvecs do not have the same number of columns"
+	exit 1
+    fi
+    # Start writing protocol file
+    ii=0
+    for b in "${bvals[@]}"; do
+	echo "${bvecs_x[ii]} ${bvecs_y[ii]} ${bvecs_z[ii]} ${b} ${p_down} ${ro_down}" >> ${out}.txt
+	ii=$((${ii} + 1))
+    done
+    ${FSLDIR}/bin/fslmerge -t ${out} ${v_up} ${v_down}
+fi
+
+
+
+
