@@ -1,0 +1,188 @@
+#!/bin/bash
+
+set -e
+echo -e "\n Getting the best b0s..."
+
+
+if [ "$6" == "" ]; then
+    echo "The script will select the best N b0 volumes for each PE direction based on topup results"
+    echo ""
+    echo "usage: pickBestB0s <data> <bvals> <index> <readout> <n> <output>"
+    echo ""
+    echo "       data: 4D raw data file to sort"
+    echo "       bvals: bvals file"
+    echo "       index: eddy index file"
+    echo "       readout: total readout time (in seconds)"
+    echo "       n: number of b0s to select"
+    echo "       output: output folder"
+    echo ""
+    exit 1
+fi
+
+
+#============================================================================
+# Identify best b0s for each PE direction using topup
+#============================================================================
+unset POSIXLY_CORRECT   # to perform floats comparison
+
+PE=("LR" "RL" "AP" "PA")
+
+data=$1          # 4D raw data file
+bvalsFile=$2     # bvals file
+eddyIdxsFile=$3  # eddy index file (1 to 4 matching the PEs defined above)
+ro_time=$4       # total readout time (in seconds)
+no_b0s=$5        # max number of b0 volumes to select for each PE direction
+outFolder=$6     # output folder
+
+confFile=${scriptsFolder}/utils/best_b0.cnf   # special topup conf file to run only a subset of iteration
+
+# Create temporary folder and read inputs
+mkdir -p ${outFolder}/tmp
+bvals=(`cat ${bvalsFile}`)
+eddyIdxs=(`cat ${eddyIdxsFile}`)
+
+
+#============================================================================
+# Extract index and PE direction of each b0 in the 4D raw file and export the
+# acqparams file; extract the b0s and run a small number of topup iterations
+#============================================================================
+i=0
+j=0
+for b in "${bvals[@]}"; do
+    if [ ${b} -lt 100 ]; then
+	b0_i[j]=${i}
+	b0_p[j]=${eddyIdxs[i]}
+	
+	if [ ${b0_p[j]} -eq 1 ]; then
+	    echo -1 0 0 ${ro_time} >> ${outFolder}/tmp/acqparams.txt
+	fi
+	if [ ${b0_p[j]} -eq 2 ]; then
+	    echo 1 0 0 ${ro_time} >> ${outFolder}/tmp/acqparams.txt
+	fi
+	if [ ${b0_p[j]} -eq 3 ]; then
+	    echo 0 -1 0 ${ro_time} >> ${outFolder}/tmp/acqparams.txt
+	fi
+	if [ ${b0_p[j]} -eq 4 ]; then
+	    echo 0 1 0 ${ro_time} >> ${outFolder}/tmp/acqparams.txt
+	fi
+
+	j=$((${j} + 1))
+	
+    fi
+
+    i=$((${i} + 1))
+done
+
+${FSLDIR}/bin/select_dwi_vols ${data} ${bvalsFile} ${outFolder}/tmp/all_b0s 0
+${FSLDIR}/bin/topup --imain=${outFolder}/tmp/all_b0s \
+	 --datain=${outFolder}/tmp/acqparams.txt \
+	 --config=${confFile} \
+	 --fout=${outFolder}/tmp/fieldmap \
+	 --iout=${outFolder}/tmp/topup_b0s \
+	 --out=${outFolder}/tmp/topup_results \
+	 -v
+
+
+#============================================================================
+# Obtain the sum of squared differences bewteen the averaged corrected b0 and
+# each individual corrected b0 volume
+#============================================================================
+${FSLDIR}/bin/fslmaths ${outFolder}/tmp/topup_b0s -Tmean ${outFolder}/tmp/topup_b0s_avg
+${FSLDIR}/bin/fslmaths ${outFolder}/tmp/topup_b0s -sub ${outFolder}/tmp/topup_b0s_avg ${outFolder}/tmp/topup_b0s_res 
+${FSLDIR}/bin/fslmaths ${outFolder}/tmp/topup_b0s_res -mul ${outFolder}/tmp/topup_b0s_res ${outFolder}/tmp/topup_b0s_sq_res
+
+# Consider only the a subset of slices by excluding the 5 top and bottom slices of the acquired volume
+# dimz3=`${FSLDIR}/bin/fslval ${outFolder}/tmp/topup_b0s_sq_res dim3`
+# ${FSLDIR}/bin/fslroi ${outFolder}/tmp/topup_b0s_sq_res ${outFolder}/tmp/topup_b0s_sq_res_roi 0 -1 0 -1 5 $((${dimz3} - 10)) 0 -1
+
+# Get brain mask from averaged results
+${FSLDIR}/bin/bet ${outFolder}/tmp/topup_b0s_avg.nii.gz ${outFolder}/tmp/nodif_brain -m -R -f 0.3
+
+# Store and write volume-wise scores
+# scores=( `${FSLDIR}/bin/fslstats -t ${outFolder}/tmp/topup_b0s_sq_res_roi -m` )
+scores=( `${FSLDIR}/bin/fslstats -t ${outFolder}/tmp/topup_b0s_sq_res -k ${outFolder}/tmp/nodif_brain_mask -M` )
+echo "b0 scores: " ${scores[@]}
+i=0
+for s in ${scores[@]}; do
+    echo ${i} ${b0_i[i]} ${b0_p[i]} ${s} >> ${outFolder}/tmp/scores.txt
+    i=$((${i} + 1))
+done
+
+
+#============================================================================
+# Based on the sorted scores, select N b0 volumes for each PE direction for 
+# the full topup processing
+#============================================================================
+sorted_i=( `cat ${outFolder}/tmp/scores.txt | sort -k 4 -n | awk '{print $1}'` )
+sorted_v=( `cat ${outFolder}/tmp/scores.txt | sort -k 4 -n | awk '{print $2}'` )
+sorted_p=( `cat ${outFolder}/tmp/scores.txt | sort -k 4 -n | awk '{print $3}'` )
+
+c_LR=0
+c_RL=0
+c_AP=0
+c_PA=0
+c=0
+b0_list=""
+for i in ${sorted_i[@]}; do
+
+    if  [ ${sorted_p[c]} -eq 1 ]; then
+	c_LR=$((${c_LR} + 1))
+	if [ ${c_LR} -le ${no_b0s} ]; then
+	    echo -1 0 0 ${ro_time} >> ${outFolder}/acqparams.txt
+	    ${FSLDIR}/bin/fslroi ${outFolder}/tmp/all_b0s ${outFolder}/tmp/grot${i} ${i} 1
+	    b0_list="${b0_list} ${outFolder}/tmp/grot${i}"
+	    echo "${sorted_v[c]} ${sorted_p[c]}" >> ${outFolder}/selected_b0s.txt
+	fi
+    fi
+
+    if  [ ${sorted_p[c]} -eq 2 ]; then
+	c_RL=$((${c_RL} + 1))
+	if [ ${c_RL} -le ${no_b0s} ]; then
+	    echo 1 0 0 ${ro_time} >> ${outFolder}/acqparams.txt
+	    ${FSLDIR}/bin/fslroi ${outFolder}/tmp/all_b0s ${outFolder}/tmp/grot${i} ${i} 1
+	    b0_list="${b0_list} ${outFolder}/tmp/grot${i}"
+	    echo "${sorted_v[c]} ${sorted_p[c]}" >> ${outFolder}/selected_b0s.txt
+	fi
+    fi
+
+    if  [ ${sorted_p[c]} -eq 3 ]; then
+	c_AP=$((${c_AP} + 1))
+	if [ ${c_AP} -le ${no_b0s} ]; then
+	    echo 0 -1 0 ${ro_time} >> ${outFolder}/acqparams.txt
+	    ${FSLDIR}/bin/fslroi ${outFolder}/tmp/all_b0s ${outFolder}/tmp/grot${i} ${i} 1
+	    b0_list="${b0_list} ${outFolder}/tmp/grot${i}"
+	    echo "${sorted_v[c]} ${sorted_p[c]}" >> ${outFolder}/selected_b0s.txt
+	fi
+    fi
+
+    if  [ ${sorted_p[c]} -eq 4 ]; then
+	c_PA=$((${c_PA} + 1))
+	if [ ${c_PA} -le ${no_b0s} ]; then
+	    echo 0 1 0 ${ro_time} >> ${outFolder}/acqparams.txt
+	    ${FSLDIR}/bin/fslroi ${outFolder}/tmp/all_b0s ${outFolder}/tmp/grot${i} ${i} 1
+	    b0_list="${b0_list} ${outFolder}/tmp/grot${i}"
+	    echo "${sorted_v[c]} ${sorted_p[c]}" >> ${outFolder}/selected_b0s.txt
+	fi
+    fi
+
+    c=$((${c} + 1))
+      
+done
+
+echo "Selected b0s: ${b0_list}"
+
+# Save the index of the best b0 and merge the selected volumes
+echo "${sorted_v[0]}" > ${outFolder}/ref_b0.txt
+mv ${outFolder}/tmp/scores.txt ${outFolder}/scores_b0s.txt
+${FSLDIR}/bin/fslmerge -t ${outFolder}/phase ${b0_list}
+
+
+#============================================================================
+# Clean unnecessary files
+#============================================================================
+rm -rf ${outFolder}/tmp
+
+
+echo -e "\n END: found best b0s."
+
+

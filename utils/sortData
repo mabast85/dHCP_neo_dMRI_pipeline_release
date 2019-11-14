@@ -1,0 +1,133 @@
+#!/bin/bash
+
+set -e
+echo -e "\n Sorting data based on ref volume..."
+
+
+if [ "$3" == "" ]; then
+    echo "The script will sort the data file and info putting the reference volume and those that come after it at the beginning of the 4D file"
+    echo ""
+    echo "usage: sortData <data> <ref> <output> [other inputs]"
+    echo ""
+    echo "       data: 4D raw data file to sort"
+    echo "       ref: reference volume"
+    echo "       output: output folder"
+    echo ""
+    echo "       Optional inputs (in the following order):"
+    echo "       <bvals>: bvals file"
+    echo "       <bvecs>: bvecs file"
+    echo "       <index>: eddy index file"
+    echo ""
+    exit 1
+fi
+
+
+#============================================================================
+# Sort the data such that the reference volume and those that come after it
+# are moved at the beginning of the 4D file
+#============================================================================
+data=$1          # 4D raw data file to sort
+ref_vol=$2       # reference volume
+outFolder=$3     # output folder
+bvalsFile=$4     # bvals file
+bvecsFile=$5     # bvecs file
+eddyIdxsFile=$6  # eddy index file
+
+mkdir -p ${outFolder}
+
+
+if [ ${ref_vol} -ne 0 ]; then   # If reference volume is not the first one, sort...
+
+    # Sort dataset
+    ${FSLDIR}/bin/fslroi ${data} ${outFolder}/tmp_data_A 0 ${ref_vol}
+    ${FSLDIR}/bin/fslroi ${data} ${outFolder}/tmp_data_B ${ref_vol} -1
+    ${FSLDIR}/bin/fslmerge -t ${outFolder}/data ${outFolder}/tmp_data_B ${outFolder}/tmp_data_A
+    rm -f ${outFolder}/tmp_*
+    
+    # Read inputs
+    if [ "$4" != "" ]; then
+	bvals=(`cat ${bvalsFile}`)
+    fi
+    if [ "$5" != "" ]; then
+	ii=0
+	while read line; do
+	    #echo ${line}
+	    tmp=(${line})
+	    if [ ${ii} -eq 0 ]; then
+		bvecs_x=("${tmp[@]}")
+	    elif [ ${ii} -eq 1 ]; then
+		bvecs_y=("${tmp[@]}")
+	    elif [ ${ii} -eq 2 ]; then
+		bvecs_z=("${tmp[@]}")
+	    fi
+	    ii=$((${ii} + 1))
+	done < ${bvecsFile}
+    fi
+    if [ "$6" != "" ]; then
+	eddyIdxs=(`cat ${eddyIdxsFile}`)
+    fi
+
+    # If provided, sort optional inputs
+    if [ "$4" != "" ]; then
+	c=0
+	for (( i=${ref_vol}; i<${#bvals[@]}; i++ )); do
+	    if [ "$4" != "" ]; then
+		new_bvals[${c}]=${bvals[${i}]}
+	    fi
+	    if [ "$5" != "" ]; then
+		new_bvecs_x[${c}]=${bvecs_x[${i}]}
+		new_bvecs_y[${c}]=${bvecs_y[${i}]}
+		new_bvecs_z[${c}]=${bvecs_z[${i}]}
+	    fi
+	    if [ "$6" != "" ]; then
+		new_eddy_idxs[${c}]=${eddyIdxs[${i}]}
+	    fi
+	    c=$((${c} + 1))
+	done
+	for (( i=0; i<${ref_vol}; i++ )); do
+	    if [ "$4" != "" ]; then
+		new_bvals[${c}]=${bvals[${i}]}
+	    fi
+	    if [ "$5" != "" ]; then
+		new_bvecs_x[${c}]=${bvecs_x[${i}]}
+		new_bvecs_y[${c}]=${bvecs_y[${i}]}
+		new_bvecs_z[${c}]=${bvecs_z[${i}]}
+	    fi
+	    if [ "$6" != "" ]; then
+		new_eddy_idxs[${c}]=${eddyIdxs[${i}]}
+	    fi
+	    c=$((${c} + 1))
+	done
+
+	# Write sorted arrays
+	if [ "$4" != "" ]; then
+	    echo "${new_bvals[@]}" > ${outFolder}/bvals
+	fi
+	if [ "$5" != "" ]; then
+	    echo "${new_bvecs_x[@]}" > ${outFolder}/bvecs
+	    echo "${new_bvecs_y[@]}" >> ${outFolder}/bvecs
+	    echo "${new_bvecs_z[@]}" >> ${outFolder}/bvecs
+	fi
+	if [ "$6" != "" ]; then
+	    echo "${new_eddy_idxs[@]}" > ${outFolder}/eddyIndex.txt
+	fi
+    fi
+
+else
+    
+    # Simply copy the files to the new location
+    ${FSLDIR}/bin/imcp ${data} ${outFolder}/data
+    if [ "$4" != "" ]; then
+	cp ${bvalsFile} ${outFolder}/bvals
+    fi
+    if [ "$5" != "" ]; then
+	cp ${bvecsFile} ${outFolder}/bvecs
+    fi
+    if [ "$6" != "" ]; then
+	cp ${eddyIdxsFile} ${outFolder}/eddyIndex.txt
+    fi
+    
+fi
+
+
+echo -e "\n END: sort data."

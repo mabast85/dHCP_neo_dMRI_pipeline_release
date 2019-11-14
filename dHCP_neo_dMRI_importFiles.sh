@@ -4,14 +4,13 @@
 set -e
 echo -e "\n START: Importing files"
 
-# scriptsFolder=/home/fs0/matteob/scripts/dHCP
 
 if [ "$6" == "" ];then
     echo ""
-    echo "usage: $0 <Data folder> <Data filename> <Output preprocessing folder> <Acquisition protocol> <Number of volumes> <Number of b0s>"
+    echo "usage: $0 <Data folder> <Data filename> <Output folder> <Acquisition protocol> <Number of volumes> <Number of b0s>"
     echo "       Data folder: Path to the data file"
     echo "       Data filename: File name for the raw data"
-    echo "       Output preprocessing folder: Path to the output pre-processing folder"
+    echo "       Output folder: Path to the subject output folder"
     echo "       Acqusition protocol: Text file with acquisition parameters"
     echo "       Number of volumes: Number of acquired volumes"
     echo "       Number of b0s: Number of b0s from each phase encoding block to use when estimating the fieldmap"
@@ -22,10 +21,14 @@ fi
 
 dataFolder=$1      # Path to data file
 dataFile=$2        # Data file name
-prepFolder=$3   # Output folder
+outFolder=$3       # Subject output folder
 acqProt=$4         # Acquisition protcol
 nVols=$5           # Number of acquired volumes
 noB0s=$6           # Number of B0 volumes for each PE direction used to estimate distortions with TOPUP
+
+prepFolder=${outFolder}/PreProcessed
+rawFolder=${outFolder}/raw
+mkdir -p ${rawFolder}/tmpData
 
 
 #============================================================================
@@ -47,9 +50,11 @@ no_PA=0
 idxb400=0
 idxb1000=0
 idxb2600=0
+bshells=(100000)
+n_b=0
 i=0
 
-echo -n > ${prepFolder}/eddy/eddyIndex.txt
+echo -n > ${rawFolder}/tmpData/eddyIndex.txt
 while read line; do
     bvec_x[i]=`echo $line | awk {'print $1'}`
     bvec_y[i]=`echo $line | awk {'print $2'}`
@@ -57,54 +62,66 @@ while read line; do
     bval[i]=`echo $line | awk {'print $4'}`
     pedir[i]=`echo $line | awk {'print $5'}`
     rotime[i]=`echo $line | awk {'print $6'}`
-    echo -n "${pedir[i]} " >> ${prepFolder}/eddy/eddyIndex.txt
-    if [ ${bval[i]} -eq 0 ]; then
-	if [ ${pedir[i]} -eq 1 ]; then #LR
-	    LRvols[idxLR]=$i
-	    idxLR=$(($idxLR + 1))	
-	elif [ ${pedir[i]} -eq 2 ]; then #RL
-	    RLvols[idxRL]=$i
-	    idxRL=$(($idxRL + 1))
-	elif [ ${pedir[i]} -eq 3 ]; then #AP
-	    APvols[idxAP]=$i
-	    idxAP=$(($idxAP + 1))
-	elif [ ${pedir[i]} -eq 4 ]; then #PA
-	    PAvols[idxPA]=$i
-	    idxPA=$(($idxPA + 1))
-	fi
-    else
-	if [ ${pedir[i]} -eq 1 ]; then #LR
-	    no_LR=$(($no_LR + 1))
-	elif [ ${pedir[i]} -eq 2 ]; then #RL
-	    no_RL=$(($no_RL + 1))
-	elif [ ${pedir[i]} -eq 3 ]; then #AP
-	    no_AP=$(($no_AP + 1))
-	elif [ ${pedir[i]} -eq 4 ]; then #PA
-	    no_PA=$(($no_PA + 1))
-	fi
-	if [ ${bval[i]} -eq 400 ]; then
-	    idxb400=$(($idxb400+1))
-	elif [ ${bval[i]} -eq 1000 ]; then
-	    idxb1000=$(($idxb1000+1))
-	elif [ ${bval[i]} -eq 2600 ]; then
-	    idxb2600=$(($idxb2600+1))
-	fi
+    echo -n "${pedir[i]} " >> ${rawFolder}/tmpData/eddyIndex.txt
+    if [ ${bval[i]} -lt 100 ]; then      #b0
+        first_b0=${i}
+        if [ ${pedir[i]} -eq 1 ]; then   #LR
+            LRvols[idxLR]=$i
+            idxLR=$(($idxLR + 1))	
+        elif [ ${pedir[i]} -eq 2 ]; then #RL
+            RLvols[idxRL]=$i
+            idxRL=$(($idxRL + 1))
+        elif [ ${pedir[i]} -eq 3 ]; then #AP
+            APvols[idxAP]=$i
+            idxAP=$(($idxAP + 1))
+        elif [ ${pedir[i]} -eq 4 ]; then #PA
+            PAvols[idxPA]=$i
+            idxPA=$(($idxPA + 1))
+        fi
+    else                                 #dw
+        if [ ${pedir[i]} -eq 1 ]; then   #LR
+            no_LR=$(($no_LR + 1))
+        elif [ ${pedir[i]} -eq 2 ]; then #RL
+            no_RL=$(($no_RL + 1))
+        elif [ ${pedir[i]} -eq 3 ]; then #AP
+            no_AP=$(($no_AP + 1))
+        elif [ ${pedir[i]} -eq 4 ]; then #PA
+            no_PA=$(($no_PA + 1))
+        fi
     fi
+    # Identify unique shells
+    b_flag=0
+    for ub in "${bshells[@]}"; do 
+        j=`echo ${bval[i]} | awk -F"E" 'BEGIN{OFMT="%10.10f"} {print $1 * (10 ^ $2)}' `  # Round bval
+	    j=${j/.*}   
+	    b_diff=`echo "${j} - ${ub}" | bc | awk ' { if($1>=0) { print $1} else {print $1*-1 }}'`
+        if [ ${b_diff} -lt 100 ]; then
+            b_flag=1
+            break
+        fi
+    done
+    if [ "${b_flag}" == 0 ]; then
+        bshells[n_b]=${bval[i]}
+        n_b=$((${n_b} + 1))
+    fi
+
     i=$(($i + 1))
     if [ $i -eq ${nVols} ]; then
-	break
+	    break
     fi
 done < ${acqProt}
+
+bshells=($(echo "${bshells[@]}" | tr ' ' '\n' | sort -n -u | tr '\n' ' '))
+echo "${bshells[@]}" > ${rawFolder}/shells
+echo "Found ${n_b} shells: ${bshells[@]} s/mm^2"
+un_pedirs=(`echo "${pedir[@]}" | tr ' ' '\n' | sort -n -u | tr '\n' ' '`)
+echo "${un_pedirs[@]}" > ${rawFolder}/pedirs
 
 
 #============================================================================
 # Write json file for QC
 #============================================================================
 echo "{" > ${prepFolder}/dataImport.json
-
-echo "   \"no_B400_vols\": $idxb400," >> ${prepFolder}/dataImport.json
-echo "   \"no_B1000_vols\": $idxb1000," >> ${prepFolder}/dataImport.json
-echo "   \"no_B2600_vols\": $idxb2600," >> ${prepFolder}/dataImport.json
 
 echo "   \"no_LR_vols\": $no_LR," >> ${prepFolder}/dataImport.json
 echo "   \"no_RL_vols\": $no_RL," >> ${prepFolder}/dataImport.json
@@ -117,10 +134,10 @@ echo "}" >> ${prepFolder}/dataImport.json
 #============================================================================
 # Write bvecs, bvals and eddy acquisition parameters file.
 #============================================================================
-echo "${bvec_x[@]}" > ${prepFolder}/tmpData/bvecs
-echo "${bvec_y[@]}" >> ${prepFolder}/tmpData/bvecs
-echo "${bvec_z[@]}" >> ${prepFolder}/tmpData/bvecs
-echo "${bval[@]}" > ${prepFolder}/bvals
+echo "${bvec_x[@]}" > ${rawFolder}/tmpData/orig_bvecs
+echo "${bvec_y[@]}" >> ${rawFolder}/tmpData/orig_bvecs
+echo "${bvec_z[@]}" >> ${rawFolder}/tmpData/orig_bvecs
+echo "${bval[@]}" > ${rawFolder}/tmpData/bvals
 
 if [ $LRvols -ne -1 ]; then
     echo -1 0 0 ${rotime[${LRvols[0]}]} > ${prepFolder}/eddy/acqparamsUnwarp.txt
@@ -143,95 +160,41 @@ else
     echo 0 1 0 0.05 >> ${prepFolder}/eddy/acqparamsUnwarp.txt
 fi
 
-#============================================================================
-# Reorient raw data and bvecs to standard orientations
-#============================================================================
-${FSLDIR}/bin/fslreorient2std ${dataFolder}/${dataFile} ${prepFolder}/tmpData/data
-${FSLDIR}/bin/fslreorient2std ${dataFolder}/${dataFile} > ${prepFolder}/tmpData/raw2std.mat
-
-echo 1 0 0 0 > ${prepFolder}/tmpData/flipZ.mat
-echo 0 1 0 0 >> ${prepFolder}/tmpData/flipZ.mat
-echo 0 0 -1 0 >> ${prepFolder}/tmpData/flipZ.mat
-echo 0 0 0 1 >> ${prepFolder}/tmpData/flipZ.mat
-
-${scriptsFolder}/utils/rotateBvecs.sh ${prepFolder}/tmpData/bvecs ${prepFolder}/tmpData/raw2std.mat ${prepFolder}/tmpData/bvecs2
-${scriptsFolder}/utils/rotateBvecs.sh ${prepFolder}/tmpData/bvecs2 ${prepFolder}/tmpData/flipZ.mat ${prepFolder}/bvecs
 
 #============================================================================
-# Check that in-plane matrix size is a multiple of 2 (for TOPUP)
+# Reorient raw data and bvecs to to match the approximate orientation 
+# of the standard template images (MNI152)
 #============================================================================
-dimt1=`${FSLDIR}/bin/fslval ${prepFolder}/tmpData/data dim1`
-c1=$(($dimt1%2))
-if [ $c1 -ne 0 ]; then
-    ${FSLDIR}/bin/fslroi ${prepFolder}/tmpData/data ${prepFolder}/tmpData/tmp 0 1 0 -1 0 -1 0 -1
-    ${FSLDIR}/bin/fslmerge -x ${prepFolder}/tmpData/data ${prepFolder}/tmpData/data ${prepFolder}/tmpData/tmp
-fi
-dimt2=`${FSLDIR}/bin/fslval ${prepFolder}/tmpData/data dim2`
-c2=$(($dimt2%2))
-if [ $c2 -ne 0 ]; then
-    ${FSLDIR}/bin/fslroi ${prepFolder}/tmpData/data ${prepFolder}/tmpData/tmp 0 -1 0 1 0 -1 0 -1
-    ${FSLDIR}/bin/fslmerge -y ${prepFolder}/tmpData/data ${prepFolder}/tmpData/data ${prepFolder}/tmpData/tmp
+${FSLDIR}/bin/fslreorient2std ${dataFolder}/${dataFile} ${rawFolder}/tmpData/data
+${FSLDIR}/bin/fslreorient2std ${dataFolder}/${dataFile} > ${rawFolder}/tmpData/raw2std.mat
+
+${scriptsFolder}/utils/rotateBvecs.sh ${rawFolder}/tmpData/orig_bvecs ${rawFolder}/tmpData/raw2std.mat ${rawFolder}/tmpData/bvecs
+
+
+#============================================================================
+# If more than 1 PE direction has been acquired, Identify best b0s for each 
+# PE direction; otherwise, set the first b0 as the reference volume.
+#============================================================================
+unique_pedirs=(`cat ${rawFolder}/pedirs`)
+if [ `echo ${#unique_pedirs[@]}` -gt 1 ]; then
+    echo "More than 1 phase encoding direction detected. Selecting best b0 volumes for topup"
+    ${scriptsFolder}/utils/pickBestB0s ${rawFolder}/tmpData/data ${rawFolder}/tmpData/bvals ${rawFolder}/tmpData/eddyIndex.txt ${rotime[0]} ${noB0s} ${prepFolder}/topup
+else
+    echo "1 phase encoding direction detected. Setting first b0 as reference volume"
+    echo "${first_b0}" > ${prepFolder}/topup/ref_b0.txt
 fi
 
 
 #============================================================================
-# Identify best b0s for every acquired PE direction
+# Sort raw data based on the selected reference volume
 #============================================================================
-echo "${LRvols[@]}" > ${prepFolder}/topup/b0Indices
-echo "${RLvols[@]}" >> ${prepFolder}/topup/b0Indices
-echo "${APvols[@]}" >> ${prepFolder}/topup/b0Indices
-echo "${PAvols[@]}" >> ${prepFolder}/topup/b0Indices
-
-if [ $LRvols -ne -1 ]; then 
-    tmp=$(printf ",%s" "${LRvols[@]}")
-    tmp=${tmp:1}
-    ${FSLDIR}/bin/fslselectvols -i ${prepFolder}/tmpData/data -o ${prepFolder}/topup/LR_B0s --vols=${tmp}
-    $scriptsFolder/utils/pickBestB0s.sh ${prepFolder}/topup 0 ${noB0s}
-fi
-if [ $RLvols -ne -1 ]; then 
-    tmp=$(printf ",%s" "${RLvols[@]}")
-    tmp=${tmp:1}
-    ${FSLDIR}/bin/fslselectvols -i ${prepFolder}/tmpData/data -o ${prepFolder}/topup/RL_B0s --vols=${tmp}
-    $scriptsFolder/utils/pickBestB0s.sh ${prepFolder}/topup 1 ${noB0s}
-fi
-if [ $APvols -ne -1 ]; then 
-    tmp=$(printf ",%s" "${APvols[@]}")
-    tmp=${tmp:1}
-    ${FSLDIR}/bin/fslselectvols -i ${prepFolder}/tmpData/data -o ${prepFolder}/topup/AP_B0s --vols=${tmp}
-    $scriptsFolder/utils/pickBestB0s.sh ${prepFolder}/topup 2 ${noB0s}
-fi
-if [ $PAvols -ne -1 ]; then 
-    tmp=$(printf ",%s" "${PAvols[@]}")
-    tmp=${tmp:1}
-    ${FSLDIR}/bin/fslselectvols -i ${prepFolder}/tmpData/data -o ${prepFolder}/topup/PA_B0s --vols=${tmp}
-    $scriptsFolder/utils/pickBestB0s.sh ${prepFolder}/topup 3 ${noB0s}
-fi
+${scriptsFolder}/utils/sortData ${rawFolder}/tmpData/data `cat ${prepFolder}/topup/ref_b0.txt` ${rawFolder} ${rawFolder}/tmpData/bvals ${rawFolder}/tmpData/bvecs ${rawFolder}/tmpData/eddyIndex.txt
 
 
 #============================================================================
-# Sort b0s based on their scores, merge them in a file and write acqparams
-# for topup and reference scan for eddy.
+# Clean unnecessary files
 #============================================================================
-bestPE=(`cat ${prepFolder}/topup/idxBestB0s.txt | sort -k 3 -n | head -n 4 | awk '{print $1}'`)
-bestVol=(`cat ${prepFolder}/topup/idxBestB0s.txt | sort -k 3 -n | head -n 4 | awk '{print $2}'`)
-
-acqpPE=("-1 0 0" "1 0 0" "0 -1 0" "0 1 0")
-PE=("LR" "RL" "AP" "PA")
-count=0
-echo -n > ${prepFolder}/topup/acqparams.txt
-for i in "${bestPE[@]}" ; do
-    dimt4=`${FSLDIR}/bin/fslval ${prepFolder}/topup/"${PE[$i]}"_B0s.nii.gz dim4`
-    for j in $(seq 0 $((${dimt4}-1))) ; do 
-	echo "${acqpPE[$i]}" "${rotime[${bestVol[${count}]}]}" >> ${prepFolder}/topup/acqparams.txt
-    done
-    PE_B0s[$count]=${prepFolder}/topup/"${PE[$i]}"_B0s.nii.gz
-    count=$(($count+1))
-done
-echo ${PE_B0s[@]}
-${FSLDIR}/bin/fslmerge -t ${prepFolder}/topup/phase ${PE_B0s[@]}
-
-
-echo "${bestVol[0]}" > ${prepFolder}/eddy/ref_scan.txt
+rm -rf ${rawFolder}/tmpData
 
 
 echo -e "\n END: Importing files"

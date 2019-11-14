@@ -1,199 +1,189 @@
 #!/bin/bash
+
+
 set -e
 echo -e "\n START: runRegistration"
 
 unset POSIXLY_CORRECT 
 
 
-if [ "$6" == "" ];then
+if [ "$4" == "" ];then
     echo ""
-    echo "usage: $0 <SubjT2wFolder> <SubjFolder> <T2wFolder> <SegmentationFolder> <SurfacesFolder> <DofsFolder>"
+    echo "usage: $0 <SubjFolder> <SubjT2> <bbr_flag> <reg2std_flag>"
     echo "       Registration script"
-    echo "       SubjT2wFolder: Path to the output folder for T2w"
-    echo "       SubjDiffFolder: Path to the output folder for dMRI"
-    echo "       T2wFolder: Path to the folder containing the bias field corrected T2w volumes"
-    echo "       SegmentationFolder: Path to the folder containing the segmentations"
-    echo "       SurfacesFolder: Path to the folder containing the surfaces"
-    echo "       DofsFolder: Path to the folder containing the warps to standard space"
+    echo "       SubjFolder: Path to the subject processing folder"
+    echo "       SubjT2: Subject T2-weighted volume"
+    echo "       bbr_flag: 0=do not use BBR, 1=use BBR (linear)"
+    echo "       reg2std_flag: 0=do not register to template, 1=register to template (non-linear)"
     echo ""
     exit 1
 fi
 
-SubjT2wFolder=$1          # Path to subject T2w folder
-SubjFolder=$2             # Path to the subject folder
-T2wFolder=$3              # T2w folder
-SegmentationFolder=$4	  # Segmentation folder
-SurfacesFolder=$5         # Surfaces folder
-DofsFolder=$6             # Dofs folder for warp fields
 
-SubjDiffFolder=${SubjFolder}/Diffusion
+subjOutFolder=$1          # Path to the subject folder
+subjT2=$2                 # Subject T2-weighted volume
+wmseg=$3                  # White matter segmentation volume (0=do not use BBR)
+reg2std=$4                # 0=do not register to template, 1=register to template (non-linear)
 
-mkdir -p ${SubjT2wFolder}/atlases
-mkdir -p ${SubjT2wFolder}/ROIs
-mkdir -p ${SubjDiffFolder}/xfms
-mkdir -p ${SubjDiffFolder}/Surfaces
+prepFolder=${subjOutFolder}/PreProcessed
+anatFolder=${subjOutFolder}/T2w
+diffFolder=${subjOutFolder}/Diffusion
+
+mkdir -p ${anatFolder}/ants
+mkdir -p ${diffFolder}/xfms
+mkdir -p ${diffFolder}/masks
 
 
 #============================================================================
-# Copy bias field-corrected T2w volume and atlases in native space
+# Copy T2w volume in processing folder
 #============================================================================
-${FSLDIR}/bin/imcp ${T2wFolder}/T2.nii ${SubjT2wFolder}/T2w.nii
-if [ ! -e ${SubjT2wFolder}/T2w.nii.gz ]; then
-    gzip -f ${SubjT2wFolder}/T2w.nii
+${FSLDIR}/bin/imcp ${subjT2} ${anatFolder}/T2w.nii
+
+
+#============================================================================
+# Extract brain using brain mask from segmented volume
+#============================================================================
+${FSLDIR}/bin/fslmaths ${anatFolder}/T2w -mul ${anatFolder}/segmentation/brain_mask ${anatFolder}/T2w_brain
+
+
+#============================================================================
+# Register dMRI data to structural T2w using mean_b1000 volume and BBR 
+# (if requested)
+#============================================================================
+if [ -e ${wmseg} ]; then 
+    echo "White matter segmentation detected. Using BBR"
+    ${FSLDIR}/bin/flirt -in ${diffFolder}/att_b1000.nii.gz -ref ${anatFolder}/T2w_brain.nii.gz -out ${diffFolder}/xfms/diff2str -omat ${diffFolder}/xfms/diff2str.mat \
+                    -bins 256 -cost bbr -wmseg ${anatFolder}/segmentation/wm_mask.nii.gz -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -dof 6  -interp spline
+else
+    echo "White matter segmentation not found. No BBR"
+    ${FSLDIR}/bin/flirt -in ${diffFolder}/att_b1000.nii.gz -ref ${anatFolder}/T2w_brain.nii.gz -out ${diffFolder}/xfms/diff2str -omat ${diffFolder}/xfms/diff2str.mat \
+                    -bins 256 -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -dof 6  -interp spline
 fi
-${FSLDIR}/bin/imcp ${SegmentationFolder}/tissue_labels.nii ${SubjT2wFolder}/atlases/tissue_labels_old.nii
-if [ ! -e ${SubjT2wFolder}/atlases/tissue_labels_old.nii.gz ]; then
-    gzip -f ${SubjT2wFolder}/atlases/tissue_labels_old.nii
+${FSLDIR}/bin/convert_xfm -omat ${diffFolder}/xfms/str2diff.mat -inverse ${diffFolder}/xfms/diff2str.mat
+
+
+#============================================================================
+# Bring FA and b0 to T2w space and tissue/brain masks to dMRI space
+#============================================================================
+${FSLDIR}/bin/flirt -in ${diffFolder}/dtifit_b1000/dti_FA.nii.gz -ref ${anatFolder}/T2w_brain.nii.gz -applyxfm -init ${diffFolder}/xfms/diff2str.mat -out ${anatFolder}/dti_FA_T2space.nii.gz -interp spline
+${FSLDIR}/bin/flirt -in ${diffFolder}/mean_b0.nii.gz -ref ${anatFolder}/T2w_brain.nii.gz -applyxfm -init ${diffFolder}/xfms/diff2str.mat -out ${anatFolder}/B0_T2space.nii.gz -interp spline
+
+if [ -e ${wmseg} ]; then 
+    ${FSLDIR}/bin/flirt -in ${anatFolder}/segmentation/wm_mask -ref ${diffFolder}/mean_b0.nii.gz -applyxfm -init ${diffFolder}/xfms/str2diff.mat -out ${diffFolder}/masks/wm_mask.nii.gz -interp nearestneighbour
 fi
-${FSLDIR}/bin/fslreorient2std ${SubjT2wFolder}/atlases/tissue_labels_old.nii.gz ${SubjT2wFolder}/atlases/tissue_labels
-rm -f ${SubjT2wFolder}/atlases/tissue_labels_old.nii.gz
+if [ -e ${anatFolder}/segmentation/gm_mask.nii.gz ]; then 
+    ${FSLDIR}/bin/flirt -in ${anatFolder}/segmentation/gm_mask -ref ${diffFolder}/mean_b0.nii.gz -applyxfm -init ${diffFolder}/xfms/str2diff.mat -out ${diffFolder}/masks/gm_mask.nii.gz -interp nearestneighbour
+fi
+if [ -e ${anatFolder}/segmentation/csf_mask.nii.gz ]; then 
+    ${FSLDIR}/bin/flirt -in ${anatFolder}/segmentation/csf_mask -ref ${diffFolder}/mean_b0.nii.gz -applyxfm -init ${diffFolder}/xfms/str2diff.mat -out ${diffFolder}/masks/csf_mask.nii.gz -interp nearestneighbour
+fi
+${FSLDIR}/bin/flirt -in ${anatFolder}/segmentation/brain_mask -ref ${diffFolder}/mean_b0.nii.gz -applyxfm -init ${diffFolder}/xfms/str2diff.mat -out ${diffFolder}/masks/brain_mask.nii.gz -interp nearestneighbour
 
 
 #============================================================================
-# Extract brain and create brain mask
+# Estimate warp fields from structural T2w to age-matched template space and 
+# compute warps from dw space to template (if required)
 #============================================================================
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels.nii -thr 0.5 -bin ${SubjT2wFolder}/nodif_brain_mask
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/T2w -mul ${SubjT2wFolder}/nodif_brain_mask ${SubjT2wFolder}/brain
+if [ "${reg2std}" -eq "1" ]; then 
 
+    age=`cat ${subjOutFolder}/age`
 
-#============================================================================
-# Register dMRI data to structural T2w using mean_b1000 volume and BBR
-#============================================================================
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels.nii -thr 1 -uthr 1 -bin ${SubjT2wFolder}/ROIs/csf_mask
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels.nii -thr 5 -uthr 5 -bin -add ${SubjT2wFolder}/ROIs/csf_mask -bin ${SubjT2wFolder}/ROIs/csf_mask
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels.nii -thr 2 -uthr 2 -bin ${SubjT2wFolder}/ROIs/gm_mask
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels.nii -thr 3 -uthr 3 -bin ${SubjT2wFolder}/ROIs/wm_mask
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/wm_mask -ero -sub ${SubjT2wFolder}/ROIs/wm_mask -abs ${SubjT2wFolder}/ROIs/wm_mask_edges.nii.gz
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/att_b1000.nii.gz -ref ${SubjT2wFolder}/brain.nii.gz -out ${SubjDiffFolder}/xfms/diff2str -omat ${SubjDiffFolder}/xfms/diff2str.mat -bins 256 -cost bbr -wmseg ${SubjT2wFolder}/ROIs/wm_mask.nii.gz -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -dof 6  -interp spline
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/mean_b0.nii.gz -ref ${SubjT2wFolder}/brain.nii.gz -out ${SubjDiffFolder}/xfms/b0_diff2str -omat ${SubjDiffFolder}/xfms/b0_diff2str.mat -bins 256 -cost bbr -wmseg ${SubjT2wFolder}/ROIs/wm_mask.nii.gz -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -dof 6  -interp spline
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/att_b1000.nii.gz -ref ${SubjT2wFolder}/brain.nii.gz -out ${SubjDiffFolder}/xfms/no_bbr_diff2str -omat ${SubjDiffFolder}/xfms/no_bbr_diff2str.mat -bins 256 -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -dof 6  -interp spline
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/mean_b0.nii.gz -ref ${SubjT2wFolder}/brain.nii.gz -out ${SubjDiffFolder}/xfms/b0_no_bbr_diff2str -omat ${SubjDiffFolder}/xfms/b0_no_bbr_diff2str.mat -bins 256 -searchrx -90 90 -searchry -90 90 -searchrz -90 90 -dof 6  -interp spline
-${FSLDIR}/bin/convert_xfm -omat ${SubjDiffFolder}/xfms/str2diff.mat -inverse ${SubjDiffFolder}/xfms/diff2str.mat
+    # Get age-matched atlas volume
+    ${FSLDIR}/bin/imcp ${templateFolder}/T2/template-${age} ${anatFolder}/template
 
+    ${ANTSPATH}/antsRegistrationSyN.sh -d 3 -f ${anatFolder}/template.nii.gz -m ${anatFolder}/T2w_brain.nii.gz -o ${anatFolder}/ants/ants_sub2std_ -t 'b' -r 8 -j 1
 
-#============================================================================
-# Create ribbon volume 
-#============================================================================
-mkdir -p ${SubjT2wFolder}/ROIs/tmp_ribbon
-wb_command -create-signed-distance-volume ${SurfacesFolder}/L.pial.native.surf.gii ${SubjT2wFolder}/T2w.nii.gz ${SubjT2wFolder}/ROIs/tmp_ribbon/sign_dist_L.nii
-wb_command -create-signed-distance-volume ${SurfacesFolder}/R.pial.native.surf.gii ${SubjT2wFolder}/T2w.nii.gz ${SubjT2wFolder}/ROIs/tmp_ribbon/sign_dist_R.nii
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/sign_dist_L.nii -uthr 0 -abs -bin ${SubjT2wFolder}/ROIs/tmp_ribbon/mask_L
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/sign_dist_R.nii -uthr 0 -abs -bin ${SubjT2wFolder}/ROIs/tmp_ribbon/mask_R
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels -mul ${SubjT2wFolder}/ROIs/tmp_ribbon/mask_L ${SubjT2wFolder}/ROIs/tmp_ribbon/tissue_labels_L
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/atlases/tissue_labels -mul ${SubjT2wFolder}/ROIs/tmp_ribbon/mask_R ${SubjT2wFolder}/ROIs/tmp_ribbon/tissue_labels_R
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/tissue_labels_L -thr 3 -bin -mul 2 ${SubjT2wFolder}/ROIs/tmp_ribbon/in_L
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/tissue_labels_L -thr 2 -uthr 2 -bin -mul 3 ${SubjT2wFolder}/ROIs/tmp_ribbon/out_L
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/tissue_labels_R -thr 3 -bin -mul 41 ${SubjT2wFolder}/ROIs/tmp_ribbon/in_R
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/tissue_labels_R -thr 2 -uthr 2 -bin -mul 42 ${SubjT2wFolder}/ROIs/tmp_ribbon/out_R
-${FSLDIR}/bin/fslmaths ${SubjT2wFolder}/ROIs/tmp_ribbon/in_L -add ${SubjT2wFolder}/ROIs/tmp_ribbon/in_R -add ${SubjT2wFolder}/ROIs/tmp_ribbon/out_L -add ${SubjT2wFolder}/ROIs/tmp_ribbon/out_R ${SubjT2wFolder}/ROIs/ribbon
+    ${C3DPATH}/c3d_affine_tool -ref ${anatFolder}/template.nii.gz -src ${anatFolder}/T2w_brain.nii.gz -itk ${anatFolder}/ants/ants_sub2std_0GenericAffine.mat \
+                             -ras2fsl -o ${anatFolder}/ants/ants_sub2std_affine_flirt.mat
+    ${C3DPATH}/c3d -mcs ${anatFolder}/ants/ants_sub2std_1Warp.nii.gz -oo ${anatFolder}/ants/wx.nii.gz ${anatFolder}/ants/wy.nii.gz ${anatFolder}/ants/wz.nii.gz
+    ${FSLDIR}/bin/fslmaths ${anatFolder}/ants/wy -mul -1 ${anatFolder}/ants/i_wy
+    ${FSLDIR}/bin/fslmerge -t ${anatFolder}/ants/ants_sub2std_warp_fnirt ${anatFolder}/ants/wx ${anatFolder}/ants/i_wy ${anatFolder}/ants/wz
+    ${FSLDIR}/bin/convertwarp --ref=${anatFolder}/template --premat=${anatFolder}/ants/ants_sub2std_affine_flirt.mat \
+                          --warp1=${anatFolder}/ants/ants_sub2std_warp_fnirt --out=${diffFolder}/xfms/str2std_warp
+    ${FSLDIR}/bin/invwarp -w ${diffFolder}/xfms/str2std_warp -o ${diffFolder}/xfms/std2str_warp -r ${anatFolder}/T2w_brain.nii.gz
 
+    ${FSLDIR}/bin/convertwarp --ref=${anatFolder}/template --premat=${diffFolder}/xfms/diff2str.mat \
+                          --warp1=${diffFolder}/xfms/str2std_warp --out=${diffFolder}/xfms/diff2std_warp
+    ${FSLDIR}/bin/invwarp -w ${diffFolder}/xfms/diff2std_warp -o ${diffFolder}/xfms/std2diff_warp -r ${diffFolder}/mean_b0.nii.gz
 
-#============================================================================
-# Bring FA and B0 to T2w space and masks to dMRI space
-#============================================================================
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/dtifit_b1000/dti_FA.nii.gz -ref ${SubjT2wFolder}/brain.nii.gz -applyxfm -init ${SubjDiffFolder}/xfms/diff2str.mat -out ${SubjT2wFolder}/ROIs/dti_FA_T2space.nii.gz -interp spline
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/mean_b0.nii.gz -ref ${SubjT2wFolder}/brain.nii.gz -applyxfm -init ${SubjDiffFolder}/xfms/diff2str.mat -out ${SubjT2wFolder}/B0_T2space.nii.gz -interp spline
-${FSLDIR}/bin/flirt -in ${SubjT2wFolder}/ROIs/wm_mask -ref ${SubjDiffFolder}/data -applyxfm -init ${SubjDiffFolder}/xfms/str2diff.mat -out ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz
-${FSLDIR}/bin/flirt -in ${SubjT2wFolder}/ROIs/gm_mask -ref ${SubjDiffFolder}/data -applyxfm -init ${SubjDiffFolder}/xfms/str2diff.mat -out ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz
-${FSLDIR}/bin/flirt -in ${SubjT2wFolder}/ROIs/ribbon -ref ${SubjDiffFolder}/data -applyxfm -init ${SubjDiffFolder}/xfms/str2diff.mat -out ${SubjFolder}/PreProcessed/QC/ribbon_diff.nii.gz -interp nearestneighbour
-${FSLDIR}/bin/fslmaths ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -sub ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz ${SubjFolder}/PreProcessed/QC/tmp
-${FSLDIR}/bin/fslmaths ${SubjFolder}/PreProcessed/QC/tmp -thr 0.0001 -mul ${SubjFolder}/PreProcessed/QC/ribbon_diff.nii.gz -bin ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz
-${FSLDIR}/bin/fslmaths ${SubjFolder}/PreProcessed/QC/tmp -uthr -0.0001 -mul ${SubjFolder}/PreProcessed/QC/ribbon_diff.nii.gz -abs -bin ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz
-${FSLDIR}/bin/imrm ${SubjFolder}/PreProcessed/QC/tmp
+    # If necessary, get warp from age-matched template to 40th week
+    if [ "$age" -ne "40" ]; then
+        ${FSLDIR}/bin/convertwarp --ref=${templateFolder}/T2/template-40 --warp1=${diffFolder}/xfms/diff2std_warp \
+                              --warp2=${templateFolder}/allwarps/template-${age}_to_template-40_warp.nii.gz --out=${diffFolder}/xfms/diff2std40w_warp
+        ${FSLDIR}/bin/convertwarp --ref=${diffFolder}/mean_b0.nii.gz --warp1=${templateFolder}/allwarps/template-40_to_template-${age}_warp.nii.gz \
+                              --warp2=${diffFolder}/xfms/std2diff_warp --out=${diffFolder}/xfms/std40w2diff_warp
+    else
+        ${FSLDIR}/bin/imcp ${diffFolder}/xfms/diff2std_warp ${diffFolder}/xfms/diff2std40w_warp
+        ${FSLDIR}/bin/imcp ${diffFolder}/xfms/std2diff_warp ${diffFolder}/xfms/std40w2diff_warp
+    fi
 
-
-#============================================================================
-# Obtain warp fields from template to structural T2w space and compute warps from dw space to template
-#============================================================================
-age=`cat ${SubjFolder}/age`
-${FSLDIR}/bin/imcp ${DofsFolder}/template-${age}-n.nii ${SubjDiffFolder}/xfms/std2str_warp
-${FSLDIR}/bin/invwarp -w ${SubjDiffFolder}/xfms/std2str_warp -o ${SubjDiffFolder}/xfms/str2std_warp -r /vols/Data/baby/NEOSEG/data/trimmed-atlas2/template-${age}
-${FSLDIR}/bin/convertwarp --ref=/vols/Data/baby/NEOSEG/data/trimmed-atlas2/template-${age} --premat=${SubjDiffFolder}/xfms/diff2str.mat --warp1=${SubjDiffFolder}/xfms/str2std_warp --out=${SubjDiffFolder}/xfms/diff2std_warp
-${FSLDIR}/bin/invwarp -w ${SubjDiffFolder}/xfms/diff2std_warp -o ${SubjDiffFolder}/xfms/std2diff_warp -r ${SubjDiffFolder}/mean_b0.nii.gz
-
-${FSLDIR}/bin/imcp /vols/Data/baby/NEOSEG/data/trimmed-atlas2/template-${age} ${SubjT2wFolder}/template
-if [ "$age" -ne "44" ]
-then
-    ${FSLDIR}/bin/imcp ${templateFolder}/atlas_warps/template-${age}_to_template-44.warp.nii.gz ${SubjDiffFolder}/xfms/age244w_warp
-    ${FSLDIR}/bin/imcp ${templateFolder}/atlas_warps/template-44_to_template-${age}.warp.nii.gz ${SubjDiffFolder}/xfms/44w2age_warp
 fi
 
-
-#============================================================================
-# Map microstructural indices on surfaces
-#============================================================================
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/dtifit_b1000/dti_FA -ref ${SubjT2wFolder}/brain -applyxfm -init ${SubjDiffFolder}/xfms/diff2str.mat -out ${SubjDiffFolder}/Surfaces/tmp.nii.gz
-wb_command -volume-to-surface-mapping ${SubjDiffFolder}/Surfaces/tmp.nii.gz ${SurfacesFolder}/R.white.native.surf.gii ${SubjDiffFolder}/Surfaces/b1p0k.FA.R.white.native.shape.gii -cubic
-wb_command -volume-to-surface-mapping ${SubjDiffFolder}/Surfaces/tmp.nii.gz ${SurfacesFolder}/L.white.native.surf.gii ${SubjDiffFolder}/Surfaces/b1p0k.FA.L.white.native.shape.gii -cubic
-
-${FSLDIR}/bin/flirt -in ${SubjDiffFolder}/dtifit_b1000/dti_MD -ref ${SubjT2wFolder}/brain -applyxfm -init ${SubjDiffFolder}/xfms/diff2str.mat -out ${SubjDiffFolder}/Surfaces/tmp.nii.gz
-wb_command -volume-to-surface-mapping ${SubjDiffFolder}/Surfaces/tmp.nii.gz ${SurfacesFolder}/R.white.native.surf.gii ${SubjDiffFolder}/Surfaces/b1p0k.MD.R.white.native.shape.gii -cubic
-wb_command -volume-to-surface-mapping ${SubjDiffFolder}/Surfaces/tmp.nii.gz ${SurfacesFolder}/L.white.native.surf.gii ${SubjDiffFolder}/Surfaces/b1p0k.MD.L.white.native.shape.gii -cubic
-
-${FSLDIR}/bin/imrm ${SubjDiffFolder}/Surfaces/tmp.nii.gz
 
 #============================================================================
 # Quality Control
 #============================================================================
-${FSLDIR}/bin/fslmaths ${SubjFolder}/PreProcessed/QC/var_b0.nii.gz -sqrt ${SubjFolder}/PreProcessed/QC/std_b0.nii.gz
-${FSLDIR}/bin/fslmaths ${SubjDiffFolder}/mean_b0 -div ${SubjFolder}/PreProcessed/QC/std_b0 -mul ${SubjDiffFolder}/nodif_brain_mask ${SubjFolder}/PreProcessed/QC/tSNR_b0
-score=`$FSLDIR/bin/fslcc -m ${SubjT2wFolder}/nodif_brain_mask ${SubjT2wFolder}/brain ${SubjT2wFolder}/B0_T2space.nii.gz  | awk '{print $3}'`
-tSNR_wm_m=`$FSLDIR/bin/fslstats ${SubjFolder}/PreProcessed/QC/tSNR_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -M  | awk '{print $1}'`
-tSNR_wm_s=`$FSLDIR/bin/fslstats ${SubjFolder}/PreProcessed/QC/tSNR_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -S  | awk '{print $1}'`
-tSNR_gm_m=`$FSLDIR/bin/fslstats ${SubjFolder}/PreProcessed/QC/tSNR_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz -M  | awk '{print $1}'`
-tSNR_gm_s=`$FSLDIR/bin/fslstats ${SubjFolder}/PreProcessed/QC/tSNR_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz -S  | awk '{print $1}'`
-B0_wm_m=`$FSLDIR/bin/fslstats ${SubjDiffFolder}/mean_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -M  | awk '{print $1}'`
-B0_wm_s=`$FSLDIR/bin/fslstats ${SubjFolder}/PreProcessed/QC/std_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -M  | awk '{print $1}'`
-B0_gm_m=`$FSLDIR/bin/fslstats ${SubjDiffFolder}/mean_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz -M  | awk '{print $1}'`
-B0_gm_s=`$FSLDIR/bin/fslstats ${SubjFolder}/PreProcessed/QC/std_b0.nii.gz -k ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz -M  | awk '{print $1}'`
-CNR_wm=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -M`)
-CNR_gm=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz -M`)
-CNR_wm_s=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -S`)
-CNR_gm_s=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${SubjFolder}/PreProcessed/QC/gm_mask_diff.nii.gz -S`)
-$FSLDIR/bin/fslmaths ${SubjFolder}/PreProcessed/eddy/eddy_corrected.eddy_residuals.nii.gz -mul ${SubjFolder}/PreProcessed/eddy/eddy_corrected.eddy_residuals.nii.gz ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared
-$FSLDIR/bin/select_dwi_vols ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared ${SubjDiffFolder}/bvals ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b0 0
-$FSLDIR/bin/select_dwi_vols ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared ${SubjDiffFolder}/bvals ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b400 400
-$FSLDIR/bin/select_dwi_vols ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared ${SubjDiffFolder}/bvals ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b1000 1000
-$FSLDIR/bin/select_dwi_vols ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared ${SubjDiffFolder}/bvals ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b2600 2600
-Res_wm_b0=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b0 -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -m`)
-Res_wm_b400=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b400 -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -m`)
-Res_wm_b1000=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b1000 -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -m`)
-Res_wm_b2600=(`$FSLDIR/bin/fslstats -t ${SubjFolder}/PreProcessed/QC/eddy_residuals_squared_b2600 -k ${SubjFolder}/PreProcessed/QC/wm_mask_diff.nii.gz -m`)
+# Registration score
+score=`${FSLDIR}/bin/fslcc -m ${anatFolder}/segmentation/brain_mask ${anatFolder}/T2w_brain ${anatFolder}/B0_T2space.nii.gz  | awk '{print $3}'`
+
+# Mean and std tissue-specific b0 intensity
+${FSLDIR}/bin/fslmaths ${prepFolder}/QC/var_b0.nii.gz -sqrt ${prepFolder}/QC/std_b0.nii.gz
+B0_wm_m=`${FSLDIR}/bin/fslstats ${diffFolder}/mean_b0.nii.gz -k ${diffFolder}/masks/wm_mask.nii.gz -M  | awk '{print $1}'`
+B0_gm_m=`${FSLDIR}/bin/fslstats ${diffFolder}/mean_b0.nii.gz -k ${diffFolder}/masks/gm_mask.nii.gz -M  | awk '{print $1}'`
+B0_wm_s=`${FSLDIR}/bin/fslstats ${prepFolder}/QC/std_b0.nii.gz -k ${diffFolder}/masks/wm_mask.nii.gz -M  | awk '{print $1}'`
+B0_gm_s=`${FSLDIR}/bin/fslstats ${prepFolder}/QC/std_b0.nii.gz -k ${diffFolder}/masks/gm_mask.nii.gz -M  | awk '{print $1}'`
+
+# Tissue-specific CNR mean and std
+CNR_wm=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${diffFolder}/masks/wm_mask.nii.gz -M`)
+CNR_gm=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${diffFolder}/masks/gm_mask.nii.gz -M`)
+CNR_wm_s=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${diffFolder}/masks/wm_mask.nii.gz -S`)
+CNR_gm_s=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/eddy/eddy_corrected.eddy_cnr_maps.nii.gz -k ${diffFolder}/masks/gm_mask.nii.gz -S`)
+
+# White matter-specific average shell-wise squared residual
+${FSLDIR}/bin/fslmaths ${prepFolder}/eddy/eddy_corrected.eddy_residuals.nii.gz -mul ${prepFolder}/eddy/eddy_corrected.eddy_residuals.nii.gz ${prepFolder}/QC/eddy_residuals_squared
+${FSLDIR}/bin/select_dwi_vols ${prepFolder}/QC/eddy_residuals_squared ${diffFolder}/bvals ${prepFolder}/QC/eddy_residuals_squared_b0 0
+${FSLDIR}/bin/select_dwi_vols ${prepFolder}/QC/eddy_residuals_squared ${diffFolder}/bvals ${prepFolder}/QC/eddy_residuals_squared_b400 400
+${FSLDIR}/bin/select_dwi_vols ${prepFolder}/QC/eddy_residuals_squared ${diffFolder}/bvals ${prepFolder}/QC/eddy_residuals_squared_b1000 1000
+${FSLDIR}/bin/select_dwi_vols ${prepFolder}/QC/eddy_residuals_squared ${diffFolder}/bvals ${prepFolder}/QC/eddy_residuals_squared_b2600 2600
+Res_wm_b0=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/QC/eddy_residuals_squared_b0 -k ${diffFolder}/masks/wm_mask.nii.gz -m`)
+Res_wm_b400=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/QC/eddy_residuals_squared_b400 -k ${diffFolder}/masks/wm_mask.nii.gz -m`)
+Res_wm_b1000=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/QC/eddy_residuals_squared_b1000 -k ${diffFolder}/masks/wm_mask.nii.gz -m`)
+Res_wm_b2600=(`${FSLDIR}/bin/fslstats -t ${prepFolder}/QC/eddy_residuals_squared_b2600 -k ${diffFolder}/masks/wm_mask.nii.gz -m`)
 
 # Write .json file
-echo "{" > ${SubjT2wFolder}/B0_T2space.json
-echo "   \"Coreg_score\": $score," >> ${SubjT2wFolder}/B0_T2space.json
+echo "{" > ${anatFolder}/B0_T2space.json
+echo "   \"Coreg_score\": $score," >> ${anatFolder}/B0_T2space.json
 tmp=$(printf ", %s" "${Res_wm_b0[@]}")
 tmp=${tmp:2}
-echo "   \"Avg_Res_B0\": [$tmp]," >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"Avg_Res_B0\": [$tmp]," >> ${anatFolder}/B0_T2space.json
 tmp=$(printf ", %s" "${Res_wm_b400[@]}")
 tmp=${tmp:2}
-echo "   \"Avg_Res_B400\": [$tmp]," >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"Avg_Res_B400\": [$tmp]," >> ${anatFolder}/B0_T2space.json
 tmp=$(printf ", %s" "${Res_wm_b1000[@]}")
 tmp=${tmp:2}
-echo "   \"Avg_Res_B1000\": [$tmp]," >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"Avg_Res_B1000\": [$tmp]," >> ${anatFolder}/B0_T2space.json
 tmp=$(printf ", %s" "${Res_wm_b2600[@]}")
 tmp=${tmp:2}
-echo "   \"Avg_Res_B2600\": [$tmp]," >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"Avg_Res_B2600\": [$tmp]," >> ${anatFolder}/B0_T2space.json
 
-echo "   \"tSNR_avg_wm\": ${CNR_wm[0]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"tSNR_std_wm\": ${CNR_wm_s[0]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"tSNR_avg_gm\": ${CNR_gm[0]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"tSNR_std_gm\": ${CNR_gm_s[0]}," >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"tSNR_avg_wm\": ${CNR_wm[0]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"tSNR_std_wm\": ${CNR_wm_s[0]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"tSNR_avg_gm\": ${CNR_gm[0]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"tSNR_std_gm\": ${CNR_gm_s[0]}," >> ${anatFolder}/B0_T2space.json
 
-echo "   \"CNR_b400_avg_wm\": ${CNR_wm[1]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"CNR_b400_std_wm\": ${CNR_wm_s[1]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"CNR_b1000_avg_wm\": ${CNR_wm[2]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"CNR_b1000_std_wm\": ${CNR_wm_s[2]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"CNR_b2600_avg_wm\": ${CNR_wm[3]}," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"CNR_b2600_std_wm\": ${CNR_wm_s[3]}," >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"CNR_b400_avg_wm\": ${CNR_wm[1]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"CNR_b400_std_wm\": ${CNR_wm_s[1]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"CNR_b1000_avg_wm\": ${CNR_wm[2]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"CNR_b1000_std_wm\": ${CNR_wm_s[2]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"CNR_b2600_avg_wm\": ${CNR_wm[3]}," >> ${anatFolder}/B0_T2space.json
+echo "   \"CNR_b2600_std_wm\": ${CNR_wm_s[3]}," >> ${anatFolder}/B0_T2space.json
 
-echo "   \"B0_avg_wm\": $B0_wm_m," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"B0_avgStd_wm\": $B0_wm_s," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"B0_avg_gm\": $B0_gm_m," >> ${SubjT2wFolder}/B0_T2space.json
-echo "   \"B0_avgStd_gm\": $B0_gm_s" >> ${SubjT2wFolder}/B0_T2space.json
-echo "}" >> ${SubjT2wFolder}/B0_T2space.json
+echo "   \"B0_avg_wm\": $B0_wm_m," >> ${anatFolder}/B0_T2space.json
+echo "   \"B0_avgStd_wm\": $B0_wm_s," >> ${anatFolder}/B0_T2space.json
+echo "   \"B0_avg_gm\": $B0_gm_m," >> ${anatFolder}/B0_T2space.json
+echo "   \"B0_avgStd_gm\": $B0_gm_s" >> ${anatFolder}/B0_T2space.json
+echo "}" >> ${anatFolder}/B0_T2space.json
 
-echo "PASS" > ${SubjT2wFolder}/regPassCheck
+echo "PASS" > ${anatFolder}/regPassCheck
 
-echo -e "\n END: runRegistration_v5"
+echo -e "\n END: runRegistration"

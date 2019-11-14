@@ -9,7 +9,7 @@ app_list=" "
 hor_gap=5
 ver_gap=1
 
-$FSLDIR/bin/overlay 0 0 ${sFolder}/Diffusion/xfms/diff2str.nii.gz 0 0.7 ${sFolder}/T2w/ROIs/wm_mask_edges.nii.gz 0.1 1 ${sFolder}/PreProcessed/QC/regOverlay
+$FSLDIR/bin/overlay 0 0 ${sFolder}/Diffusion/xfms/diff2str.nii.gz 0 0.7 ${sFolder}/T2w/segmentation/wm_mask_edges.nii.gz 0.1 1 ${sFolder}/PreProcessed/QC/regOverlay
 $FSLDIR/bin/slicer ${sFolder}/PreProcessed/QC/regOverlay -L -S 9 1160 ${sFolder}/PreProcessed/QC/regOverlay.png
 
 $FSLDIR/bin/slicer ${sFolder}/Diffusion/mean_b0.nii.gz -i 0 60 -a ${sFolder}/PreProcessed/QC/b0.png

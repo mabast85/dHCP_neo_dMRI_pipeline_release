@@ -1,24 +1,81 @@
 #!/bin/bash
+
+
 set -e
 echo -e "\n START: runEddy"
+date
 
 
-prepFolder=$1
-dataFile=$2
+if [ "$1" == "" ];then
+    echo ""
+    echo "usage: $0 <Subject folder> <slspec>"
+    echo "       Subject folder: Path to the main subject folder"
+	echo "       slspec: eddy slspec file"
+    echo ""
+    exit 1
+fi
 
+
+subFolder=$1
+slspec=$2
+gpuFlag=$3
+
+rawFolder=${subFolder}/raw
+prepFolder=${subFolder}/PreProcessed
 topupFolder=${prepFolder}/topup
 eddyFolder=${prepFolder}/eddy
 
-ref_scan=`cat ${eddyFolder}/ref_scan.txt`
 
-${FSLDIR}/bin/eddy_cuda --imain=${dataFile} --mask=${topupFolder}/nodif_brain_mask.nii.gz --index=${eddyFolder}/eddyIndex.txt --bvals=${prepFolder}/bvals --bvecs=${prepFolder}/bvecs --acqp=${eddyFolder}/acqparamsUnwarp.txt --topup=${topupFolder}/topup_results --out=${eddyFolder}/eddy_corrected --very_verbose --niter=5 --fwhm=10,5,0,0,0 --s2v_niter=10 --mporder=8 --nvoxhp=5000 --slspec=${scriptsFolder}/slorder.txt --repol --ol_type=both --s2v_interp=trilinear --s2v_lambda=1 --ref_scan_no=${ref_scan} --data_is_shelled --cnr_maps --residuals --dont_mask_output
+#============================================================================
+# Add the necessary options based on the actual protocol.
+#============================================================================
+cmd=""
+if [ "${slspec}" != "0" ]; then
+    echo "slspec file provided."
+    cmd="${cmd} --slspec=${slspec}"
+    if [ "${gpuFlag}" -eq "1" ]; then
+	echo "GPU acceleration enabled; running s2v eddy"
+	cmd="${cmd} --s2v_niter=10 --mporder=8 --s2v_interp=trilinear --s2v_lambda=1"
+    fi
+fi
+if [ -e ${topupFolder}/topup_results_fieldcoef.nii.gz ]; then
+    echo "topup output detected. Adding the results to eddy."
+    cmd="${cmd} --topup=${topupFolder}/topup_results"
+    if [ "${gpuFlag}" -eq "1" ]; then
+	echo "Correcting for mot-by-susc interactions."
+	cmd="${cmd} --estimate_move_by_susceptibility --mbs_niter=20 --mbs_ksp=10 --mbs_lambda=10"
+    fi
+else
+    echo "topup output not detected. Extracting brain mask from raw b0s."
+    ${FSLDIR}/bin/bet ${rawFolder}/data ${topupFolder}/nodif_brain -m -f 0.25 -R
+fi
+
+#============================================================================
+# Pick eddy executable based on GPU acceleration
+#============================================================================
+if [ "${gpuFlag}" -eq "1" ]; then
+    eddy_exec=${FSLDIR}/bin/eddy_cuda
+else
+    eddy_exec=${FSLDIR}/bin/eddy_openmp
+fi
+
+
+# Run eddy
+${FSLDIR}/bin/eddy_cuda --imain=${rawFolder}/data --mask=${topupFolder}/nodif_brain_mask.nii.gz --index=${rawFolder}/eddyIndex.txt \
+						--bvals=${rawFolder}/bvals --bvecs=${rawFolder}/bvecs --acqp=${eddyFolder}/acqparamsUnwarp.txt \
+						--out=${eddyFolder}/eddy_corrected --very_verbose \
+						--niter=5 --fwhm=10,5,0,0,0 --nvoxhp=5000 \
+						--repol --ol_type=both  --ol_nstd=3 \
+						${cmd} \
+						--data_is_shelled --cnr_maps --residuals --dont_mask_output \
+						
 
 
 #============================================================================
 # Run bet on average iout.
 #============================================================================
 echo "Running BET on the hifi b0"
-${FSLDIR}/bin/select_dwi_vols ${eddyFolder}/eddy_corrected ${prepFolder}/bvals ${eddyFolder}/hifib0 0 -m
+${FSLDIR}/bin/select_dwi_vols ${eddyFolder}/eddy_corrected ${rawFolder}/bvals ${eddyFolder}/hifib0 0 -m
 ${FSLDIR}/bin/bet ${eddyFolder}/hifib0 ${eddyFolder}/nodif_brain -m -f 0.25 -R
 
 
@@ -33,8 +90,8 @@ n_ol_LR=0
 n_ol_RL=0
 n_ol_AP=0
 n_ol_PA=0
-bvals=($(head -n 1 ${prepFolder}/bvals))
-eddyIndex=($(head -n 1 ${eddyFolder}/eddyIndex.txt))
+bvals=($(head -n 1 ${rawFolder}/bvals))
+eddyIndex=($(head -n 1 ${rawFolder}/eddyIndex.txt))
 dimt3=`${FSLDIR}/bin/fslval ${eddyFolder}/eddy_corrected.nii.gz dim3`
 dimt4=`${FSLDIR}/bin/fslval ${eddyFolder}/eddy_corrected.nii.gz dim4`
 
@@ -76,27 +133,6 @@ do
 done < ${eddyFolder}/eddy_corrected.eddy_outlier_map
 tot_ol=$((${n_ol_b400}+${n_ol_b1000}+${n_ol_b2600}))
 
-# Compute average subject motion
-#   m_abs: average absolute subject motion
-#   m_rel: average relative subject motion
-m_abs=0
-m_rel=0
-while read line
-do
-    # Read first column from EDDY output
-    val=`echo $line | awk {'print $1'}`
-    # To handle scientific notation, we need the following line
-    val=`echo ${val} | sed -e 's/[eE]+*/\\*10\\^/'`
-    m_abs=`echo "${m_abs} + ${val}" | bc -l`
-    # Read second column from EDDY output
-    val=`echo $line | awk {'print $2'}`
-    # To handle scientific notation, we need the following line
-    val=`echo ${val} | sed -e 's/[eE]+*/\\*10\\^/'`
-    m_rel=`echo "${m_rel} + ${val}" | bc -l`
-done < ${eddyFolder}/eddy_corrected.eddy_movement_rms
-m_abs=`echo "${m_abs} / ${dimt4}" | bc -l`
-m_rel=`echo "${m_rel} / ${dimt4}" | bc -l`
-
 # Write .json file
 echo "{" > ${eddyFolder}/eddy_corrected.json
 echo "   \"Tot_ol\": $tot_ol," >> ${eddyFolder}/eddy_corrected.json
@@ -113,9 +149,9 @@ echo "   \"No_ol_LR\": $n_ol_LR," >> ${eddyFolder}/eddy_corrected.json
 echo "   \"No_ol_RL\": $n_ol_RL," >> ${eddyFolder}/eddy_corrected.json
 echo "   \"No_ol_AP\": $n_ol_AP," >> ${eddyFolder}/eddy_corrected.json
 echo "   \"No_ol_PA\": $n_ol_PA," >> ${eddyFolder}/eddy_corrected.json
-echo "   \"Avg_motion\": $m_abs" >> ${eddyFolder}/eddy_corrected.json
 echo "}" >> ${eddyFolder}/eddy_corrected.json
 
 
+date
 echo -e "\n END: runEddy"
 
